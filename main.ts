@@ -1,4 +1,4 @@
-// Декодируем ссылки DuckDuckGo (uddg параметр)
+// Декодируем ссылки DuckDuckGo
 function decodeDdgLink(href: string): string {
   try {
     const u = new URL(href, "https://duckduckgo.com");
@@ -8,45 +8,35 @@ function decodeDdgLink(href: string): string {
   }
 }
 
-// Парсим HTML страницы DuckDuckGo
-function parseResults(html: string): Array<{ title: string; url: string; snippet: string }> {
+// Парсим результаты через HTMLRewriter (работает в Deno)
+async function parseResults(html: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
   const results: Array<{ title: string; url: string; snippet: string }> = [];
+  let current: { title: string; url: string; snippet: string } | null = null;
 
-  // Ищем блоки результатов через регулярки (без DOM-парсера, чтобы работало в Deno)
-  const resultRegex = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRegex = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-
-  const titles: Array<{ url: string; title: string }> = [];
-  let match;
-
-  while ((match = resultRegex.exec(html)) !== null) {
-    const rawUrl = match[1];
-    const rawTitle = match[2];
-    titles.push({
-      url: decodeDdgLink(rawUrl),
-      title: rawTitle.replace(/<[^>]+>/g, "").trim()
+  const rewriter = new HTMLRewriter()
+    .on("a.result__a", {
+      element(el) {
+        const href = el.getAttribute("href") || "";
+        current = { title: "", url: decodeDdgLink(href), snippet: "" };
+        results.push(current);
+      },
+      text(t) {
+        if (current) current.title += t.text;
+      }
+    })
+    .on("a.result__snippet, div.result__snippet", {
+      text(t) {
+        if (current) current.snippet += t.text;
+      }
     });
-  }
 
-  const snippets: string[] = [];
-  while ((match = snippetRegex.exec(html)) !== null) {
-    snippets.push(match[1].replace(/<[^>]+>/g, "").trim());
-  }
+  await rewriter.transform(new Response(html)).arrayBuffer();
 
-  for (let i = 0; i < titles.length; i++) {
-    if (titles[i].title && titles[i].url) {
-      results.push({
-        title: titles[i].title,
-        url: titles[i].url,
-        snippet: snippets[i] || ""
-      });
-    }
-  }
-
-  return results.slice(0, 10);
+  return results
+    .map(r => ({ ...r, title: r.title.trim(), snippet: r.snippet.trim() }))
+    .filter(r => r.title && r.url);
 }
 
-// Основной обработчик
 Deno.serve(async (req: Request) => {
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
@@ -89,7 +79,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const html = await ddg.text();
-    const results = parseResults(html);
+    const results = await parseResults(html);
 
     return Response.json(
       { query, count: results.length, results },
