@@ -1,4 +1,3 @@
-// Декодируем ссылки DuckDuckGo
 function decodeDdgLink(href: string): string {
   try {
     const u = new URL(href, "https://duckduckgo.com");
@@ -8,33 +7,37 @@ function decodeDdgLink(href: string): string {
   }
 }
 
-// Парсим результаты через HTMLRewriter (работает в Deno)
-async function parseResults(html: string): Promise<Array<{ title: string; url: string; snippet: string }>> {
+function stripTags(html: string): string {
+  return html.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+}
+
+function parseResults(html: string): Array<{ title: string; url: string; snippet: string }> {
   const results: Array<{ title: string; url: string; snippet: string }> = [];
-  let current: { title: string; url: string; snippet: string } | null = null;
 
-  const rewriter = new HTMLRewriter()
-    .on("a.result__a", {
-      element(el) {
-        const href = el.getAttribute("href") || "";
-        current = { title: "", url: decodeDdgLink(href), snippet: "" };
-        results.push(current);
-      },
-      text(t) {
-        if (current) current.title += t.text;
-      }
-    })
-    .on("a.result__snippet, div.result__snippet", {
-      text(t) {
-        if (current) current.snippet += t.text;
-      }
-    });
+  // Разбиваем HTML на блоки результатов
+  const blocks = html.split(/<div[^>]*class="[^"]*result[^"]*"[^>]*>/i);
 
-  await rewriter.transform(new Response(html)).arrayBuffer();
+  for (const block of blocks) {
+    const titleMatch = block.match(/<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!titleMatch) continue;
 
-  return results
-    .map(r => ({ ...r, title: r.title.trim(), snippet: r.snippet.trim() }))
-    .filter(r => r.title && r.url);
+    const url = decodeDdgLink(titleMatch[1]);
+    const title = stripTags(titleMatch[2]);
+
+    let snippet = "";
+    const snippetMatch = block.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
+    if (snippetMatch) snippet = stripTags(snippetMatch[1]);
+    else {
+      const divSnippet = block.match(/<div[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i);
+      if (divSnippet) snippet = stripTags(divSnippet[1]);
+    }
+
+    if (title && url) {
+      results.push({ title, url, snippet });
+    }
+  }
+
+  return results.slice(0, 10);
 }
 
 Deno.serve(async (req: Request) => {
@@ -66,7 +69,7 @@ Deno.serve(async (req: Request) => {
     const ddgUrl = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
     const ddg = await fetch(ddgUrl, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ru,en;q=0.8"
       }
     });
@@ -79,7 +82,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const html = await ddg.text();
-    const results = await parseResults(html);
+    const results = parseResults(html);
 
     return Response.json(
       { query, count: results.length, results },
