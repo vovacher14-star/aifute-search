@@ -1,39 +1,45 @@
-function decodeDdgLink(href: string): string {
-  try {
-    const u = new URL(href, "https://duckduckgo.com");
-    return u.searchParams.get("uddg") || u.href;
-  } catch {
-    return href;
-  }
-}
-
 function stripTags(html: string): string {
   return html.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
 }
 
-function parseResults(html: string): Array<{ title: string; url: string; snippet: string }> {
+function decodeHtml(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+function parseLiteResults(html: string): Array<{ title: string; url: string; snippet: string }> {
   const results: Array<{ title: string; url: string; snippet: string }> = [];
 
-  // Разбиваем HTML на блоки результатов
-  const blocks = html.split(/<div[^>]*class="[^"]*result[^"]*"[^>]*>/i);
+  // DuckDuckGo Lite: результаты в <a class="result-link">
+  const linkRegex = /<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
 
-  for (const block of blocks) {
-    const titleMatch = block.match(/<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!titleMatch) continue;
+  const links: Array<{ url: string; title: string }> = [];
+  let match;
+  while ((match = linkRegex.exec(html)) !== null) {
+    links.push({
+      url: decodeHtml(match[1]),
+      title: decodeHtml(stripTags(match[2]))
+    });
+  }
 
-    const url = decodeDdgLink(titleMatch[1]);
-    const title = stripTags(titleMatch[2]);
+  const snippets: string[] = [];
+  while ((match = snippetRegex.exec(html)) !== null) {
+    snippets.push(decodeHtml(stripTags(match[1])));
+  }
 
-    let snippet = "";
-    const snippetMatch = block.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
-    if (snippetMatch) snippet = stripTags(snippetMatch[1]);
-    else {
-      const divSnippet = block.match(/<div[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i);
-      if (divSnippet) snippet = stripTags(divSnippet[1]);
-    }
-
-    if (title && url) {
-      results.push({ title, url, snippet });
+  for (let i = 0; i < links.length; i++) {
+    if (links[i].title && links[i].url) {
+      results.push({
+        title: links[i].title,
+        url: links[i].url,
+        snippet: snippets[i] || ""
+      });
     }
   }
 
@@ -66,11 +72,13 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const ddgUrl = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+    // Используем Lite-версию DuckDuckGo — она проще и чаще пропускает
+    const ddgUrl = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
     const ddg = await fetch(ddgUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ru,en;q=0.8"
+        "Accept-Language": "ru,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml"
       }
     });
 
@@ -82,7 +90,23 @@ Deno.serve(async (req: Request) => {
     }
 
     const html = await ddg.text();
-    const results = parseResults(html);
+    const results = parseLiteResults(html);
+
+    // Возвращаем также кусок HTML для отладки, если 0 результатов
+    if (results.length === 0) {
+      return Response.json(
+        {
+          query,
+          count: 0,
+          results: [],
+          debug: {
+            htmlLength: html.length,
+            htmlStart: html.slice(0, 500)
+          }
+        },
+        { headers: corsHeaders }
+      );
+    }
 
     return Response.json(
       { query, count: results.length, results },
