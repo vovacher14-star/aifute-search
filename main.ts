@@ -12,34 +12,28 @@ function decodeHtml(text: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
-function parseLiteResults(html: string): Array<{ title: string; url: string; snippet: string }> {
+function parseBing(html: string): Array<{ title: string; url: string; snippet: string }> {
   const results: Array<{ title: string; url: string; snippet: string }> = [];
 
-  // DuckDuckGo Lite: результаты в <a class="result-link">
-  const linkRegex = /<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
-
-  const links: Array<{ url: string; title: string }> = [];
+  // Bing: <li class="b_algo"> ... <h2><a href="...">Title</a></h2> ... <p>Snippet</p>
+  const blockRegex = /<li[^>]*class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
   let match;
-  while ((match = linkRegex.exec(html)) !== null) {
-    links.push({
-      url: decodeHtml(match[1]),
-      title: decodeHtml(stripTags(match[2]))
-    });
-  }
 
-  const snippets: string[] = [];
-  while ((match = snippetRegex.exec(html)) !== null) {
-    snippets.push(decodeHtml(stripTags(match[1])));
-  }
+  while ((match = blockRegex.exec(html)) !== null) {
+    const block = match[1];
 
-  for (let i = 0; i < links.length; i++) {
-    if (links[i].title && links[i].url) {
-      results.push({
-        title: links[i].title,
-        url: links[i].url,
-        snippet: snippets[i] || ""
-      });
+    const titleMatch = block.match(/<h2[^>]*>[\s\S]*?<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!titleMatch) continue;
+
+    const url = decodeHtml(titleMatch[1]);
+    const title = decodeHtml(stripTags(titleMatch[2]));
+
+    let snippet = "";
+    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (snippetMatch) snippet = decodeHtml(stripTags(snippetMatch[1]));
+
+    if (title && url && url.startsWith("http")) {
+      results.push({ title, url, snippet });
     }
   }
 
@@ -53,28 +47,19 @@ Deno.serve(async (req: Request) => {
     "Access-Control-Allow-Headers": "Content-Type"
   };
 
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
-
-  if (req.method !== "GET") {
-    return new Response("Method not allowed", { status: 405, headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method !== "GET") return new Response("Method not allowed", { status: 405, headers: corsHeaders });
 
   const url = new URL(req.url);
   const query = url.searchParams.get("q")?.trim();
 
   if (!query || query.length === 0 || query.length > 300) {
-    return Response.json(
-      { error: "Use ?q=query (max 300 chars)" },
-      { status: 400, headers: corsHeaders }
-    );
+    return Response.json({ error: "Use ?q=query (max 300 chars)" }, { status: 400, headers: corsHeaders });
   }
 
   try {
-    // Используем Lite-версию DuckDuckGo — она проще и чаще пропускает
-    const ddgUrl = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
-    const ddg = await fetch(ddgUrl, {
+    const bingUrl = "https://www.bing.com/search?q=" + encodeURIComponent(query) + "&setlang=ru";
+    const bing = await fetch(bingUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "ru,en;q=0.8",
@@ -82,40 +67,22 @@ Deno.serve(async (req: Request) => {
       }
     });
 
-    if (!ddg.ok) {
-      return Response.json(
-        { error: "DuckDuckGo error: " + ddg.status },
-        { status: 502, headers: corsHeaders }
-      );
+    if (!bing.ok) {
+      return Response.json({ error: "Bing error: " + bing.status }, { status: 502, headers: corsHeaders });
     }
 
-    const html = await ddg.text();
-    const results = parseLiteResults(html);
+    const html = await bing.text();
+    const results = parseBing(html);
 
-    // Возвращаем также кусок HTML для отладки, если 0 результатов
     if (results.length === 0) {
-      return Response.json(
-        {
-          query,
-          count: 0,
-          results: [],
-          debug: {
-            htmlLength: html.length,
-            htmlStart: html.slice(0, 500)
-          }
-        },
-        { headers: corsHeaders }
-      );
+      return Response.json({
+        query, count: 0, results: [],
+        debug: { htmlLength: html.length, htmlStart: html.slice(0, 800) }
+      }, { headers: corsHeaders });
     }
 
-    return Response.json(
-      { query, count: results.length, results },
-      { headers: corsHeaders }
-    );
+    return Response.json({ query, count: results.length, results }, { headers: corsHeaders });
   } catch (e) {
-    return Response.json(
-      { error: "Search error: " + (e as Error).message },
-      { status: 500, headers: corsHeaders }
-    );
+    return Response.json({ error: "Search error: " + (e as Error).message }, { status: 500, headers: corsHeaders });
   }
 });
